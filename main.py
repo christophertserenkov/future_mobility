@@ -10,8 +10,10 @@ from hardware import HardWare
 # Degub mode disables motors and enables cv image show
 DEBUG_MODE = False
 MOTOR_ENABLE = True
-MOTOR_BASE_SPEED = 80
+MOTOR_BASE_SPEED = 100
 MOTOR_CROSWALK_SPEED = int(MOTOR_BASE_SPEED / 2)
+
+motor_speed = 0
 
 # Yolo model
 model = YOLO("best.onnx")
@@ -20,7 +22,7 @@ model = YOLO("best.onnx")
 APPROX_TRACK_WIDTH = 500
 
 # PID Cooficents
-KP = 1
+KP = 0.5
 KI = 0.6
 KD = 0
 
@@ -54,10 +56,14 @@ tries = 0
 # Previous midpoint
 previous_detected_midpoint = 0
 
-# Flask shared frame
+# Flask shared frames
 app = Flask(__name__)
+
 latest_frame = None
+display_frame = None
+
 frame_lock = threading.Lock()
+stop_event = threading.Event()
 
 # Init hardware
 hw = HardWare(MOTOR_IN1, MOTOR_IN2, SERVO, HALL_PIN)
@@ -74,15 +80,19 @@ camera.configure(config)
 
 # Stream the newest annotated frame using MJPEG
 def generate_frames():
-    while True:
+    while not stop_event.is_set():
         with frame_lock:
-            frame = latest_frame.copy() if latest_frame is not None else None
+            frame = display_frame.copy() if display_frame is not None else None
 
         if frame is None:
             sleep(0.01)
             continue
 
-        success, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        success, buffer = cv2.imencode(
+            ".jpg",
+            frame,
+            [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+        )
 
         if not success:
             continue
@@ -94,6 +104,11 @@ def generate_frames():
             + b"\r\n"
         )
 
+def publishFrame(frame):
+    global display_frame
+
+    with frame_lock:
+        display_frame = frame.copy()
 
 @app.route("/")
 def index():
@@ -135,6 +150,23 @@ def video_feed():
 def run_flask():
     app.run(host=FLASK_HOST, port=FLASK_PORT, threaded=True, debug=False, use_reloader=False)
 
+def captureFrames():
+    global latest_frame
+
+    while not stop_event.is_set():
+        frame = camera.capture_array()
+
+        with frame_lock:
+            latest_frame = frame
+
+
+def getFrame():
+    with frame_lock:
+        if latest_frame is None:
+            return None
+
+        return latest_frame.copy()
+
 
 try:
     camera.start()
@@ -146,13 +178,21 @@ try:
     server_thread = threading.Thread(target=run_flask, daemon=True)
     server_thread.start()
 
+    # Start camera capture thread
+    capture_thread = threading.Thread(target=captureFrames, daemon=True)
+    capture_thread.start()
+
     print(f"Camera server starting on port {FLASK_PORT}")
     print("Open http://<raspberry-pi-ip>:5000")
 
     # Main loop
     while True:
-        # Capture frame
-        frame = camera.capture_array()
+        # Get newest camera frame
+        frame = getFrame()
+
+        if frame is None:
+            sleep(0.01)
+            continue
 
         # Crop image
         h, w, _ = frame.shape
@@ -293,8 +333,7 @@ try:
         cv2.putText(display_frame, status, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 2)
 
         # Publish frame to Flask
-        with frame_lock:
-            latest_frame = display_frame.copy()
+        publishFrame(display_frame)
 
         if DEBUG_MODE:
             # Show image
@@ -307,7 +346,10 @@ except KeyboardInterrupt:
     print("Stopping robot...")
 
 finally:
-    # Stop the motors even if an exception occurs
+    # Signal threads to stop
+    stop_event.set()
+
+    # Stop motors
     try:
         hw.setMotor(0)
         hw.setServo(0)
@@ -315,8 +357,17 @@ finally:
     except Exception as exc:
         print(f"Hardware shutdown error: {exc}")
 
+    # Stop camera and release resources
     try:
         camera.stop()
+    except Exception:
+        pass
+
+    # Wait for camera thread
+    if 'capture_thread' in locals() and capture_thread.is_alive():
+        capture_thread.join(timeout=2)
+
+    try:
         camera.close()
     except Exception:
         pass
