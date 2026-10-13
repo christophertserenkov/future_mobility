@@ -10,17 +10,18 @@ from hardware import HardWare
 # Degub mode disables motors and enables cv image show
 DEBUG_MODE = False
 MOTOR_ENABLE = True
-MOTOR_BASE_SPEED = 50
+MOTOR_BASE_SPEED = 80
+MOTOR_CROSWALK_SPEED = int(MOTOR_BASE_SPEED / 2)
 
 # Yolo model
 model = YOLO("best.onnx")
 
 # Estimated track width
-APPROX_TRACK_WIDTH = 580
+APPROX_TRACK_WIDTH = 500
 
 # PID Cooficents
-KP = 0.8
-KI = 0.5
+KP = 1
+KI = 0.6
 KD = 0
 
 # Hardware pins
@@ -49,6 +50,9 @@ last_PID_time = monotonic()
 
 # No lines variables
 tries = 0
+
+# Previous midpoint
+previous_detected_midpoint = 0
 
 # Flask shared frame
 app = Flask(__name__)
@@ -190,7 +194,15 @@ try:
                 # Get midpoint
                 left = line_midpoints[0]
                 right = line_midpoints[1]
-                midpoint = (left + right) / 2
+                if left < camera_center and right > camera_center:
+                    midpoint = (left + right) / 2
+                else:
+                    mid_of_incorrect_points = (left + right) / 2 
+
+                    if mid_of_incorrect_points < camera_center:
+                        midpoint = mid_of_incorrect_points + APPROX_TRACK_WIDTH
+                    else:
+                        midpoint = mid_of_incorrect_points - APPROX_TRACK_WIDTH
 
             elif len(line_midpoints) > 2:
                 # Store best point pairs

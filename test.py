@@ -5,15 +5,17 @@ from time import sleep, monotonic
 from picamera2 import Picamera2
 from scipy.signal import find_peaks
 from hardware import HardWare
-from ultralytics import YOLO
 
 # Degub mode disables motors and enables cv image show
-DEBUG_MODE = True
-MOTOR_ENABLE = False
+DEBUG_MODE = False
+MOTOR_ENABLE = True
 MOTOR_SPEED = 100
 
-# Yolo model
-model = YOLO("best.onnx")
+# Crosswalk (more than 3 lines)
+CROSSWALK_SPEED = 35
+CROSSWALK_TIME = 2
+crosswalk_until = 0
+crosswalk_ignore_until = 0
 
 # I have slept for two hours tonight I have no comment on these variables
 APPROX_TRACK_WIDTH = 500
@@ -21,7 +23,7 @@ WIDTH_ADAPT = 0.1
 
 # PID Cooficents
 KP = 0.8
-KI = 0.0
+KI = 0.1
 KD = 0
 
 # Smoothing (ERROR_FILTER = 1, DEADBAND = 0 and MAX_STEP = 200 means off)
@@ -147,6 +149,13 @@ try:
         line_midpoints = [sum(group) / len(group) for group in groups if len(group) >= 2]
         print(f"Line midpoints {len(line_midpoints)}")
 
+        # Crosswalk, more than 3 lines. Slow down for CROSSWALK_TIME seconds
+        # and then ignore crosswalks for CROSSWALK_COOLDOWN seconds, so we continue normally
+        if len(line_midpoints) > 3 and monotonic() > crosswalk_ignore_until:
+            crosswalk_until = monotonic() + CROSSWALK_TIME
+            crosswalk_ignore_until = crosswalk_until
+            print("Crosswalk")
+
         # Match lines to the old left and right line
         left_match = None
         right_match = None
@@ -206,8 +215,14 @@ try:
             # Reset tries
             tries = 0
 
+            # Slow down on crosswalk
+            speed = MOTOR_SPEED
+
+            if monotonic() < crosswalk_until:
+                speed = CROSSWALK_SPEED
+
             if MOTOR_ENABLE:
-                hw.setMotor(MOTOR_SPEED)
+                hw.setMotor(speed)
 
             # Calculate error and smooth it
             raw_error = midpoint - camera_center

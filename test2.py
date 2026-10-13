@@ -1,21 +1,24 @@
-
 import cv2
+import numpy as np
 import pigpio
 import threading
 from time import sleep, monotonic
-from flask import Flask, Response
 from picamera2 import Picamera2
 from scipy.signal import find_peaks
 from hardware import HardWare
-from ultralytics import YOLO
 
 # Degub mode disables motors and enables cv image show
 DEBUG_MODE = False
 MOTOR_ENABLE = True
-MOTOR_SPEED = 100
+MOTOR_SPEED =100
 
-# Yolo model
-model = YOLO("best.onnx")
+# Crosswalk (2 horizontal lines)
+# Row (in the resized 360 row picture) where we start looking for crosswalk lines
+CROSSWALK_Y = 150
+CROSSWALK_SPEED = 35
+CROSSWALK_TIME = 2
+crosswalk_until = 0
+crosswalk_ignore_until = 0
 
 # I have slept for two hours tonight I have no comment on these variables
 APPROX_TRACK_WIDTH = 500
@@ -23,17 +26,11 @@ WIDTH_ADAPT = 0.1
 
 # PID Cooficents
 KP = 0.8
-KI = 0.0
+KI = 0.1
 KD = 0
-
-# Smoothing (ERROR_FILTER = 1, DEADBAND = 0 and MAX_STEP = 200 means off)
-ERROR_FILTER = 1
-DEADBAND = 0
-MAX_STEP = 200
 
 # PID memory variables
 previous_error = 0
-filtered_error = 0
 integral_sum = 0
 previous_correction = 0
 
@@ -44,7 +41,7 @@ last_PID_time = monotonic()
 tries = 0
 
 # Hardware pins
-SERVO = 18
+SERVO = 18 
 MOTOR_IN1 = 20
 MOTOR_IN2 = 21
 HALL_PIN = 22
@@ -52,7 +49,7 @@ HALL_PIN = 22
 # Y coordinate to cut off
 CROP_Y_COORDINATE = 520
 
-# Y coordinates of track detection lines
+# Y coordinates of trach detection lines
 TRACK_LINES = [30, 40, 50]
 
 # Peak settings
@@ -67,10 +64,6 @@ MATCH_GATE = 180
 left_line = None
 right_line = None
 track_width = APPROX_TRACK_WIDTH
-
-# Flask settings
-FLASK_PORT = 5000
-JPEG_QUALITY = 70
 
 # Init hardware
 hw = HardWare(MOTOR_IN1, MOTOR_IN2, SERVO, HALL_PIN)
@@ -88,88 +81,8 @@ camera.start()
 # Set turn angle to 0
 hw.setServo(0)
 
-latest_frame = None
-latest_stream_frame = None
-camera_lock = threading.Lock()
-stream_lock = threading.Lock()
+latest_frame = camera.capture_array()
 running = True
-
-# Flask server
-app = Flask(__name__)
-
-
-def generate_frames():
-    while running:
-        with stream_lock:
-            frame = latest_stream_frame.copy() if latest_stream_frame is not None else None
-
-        if frame is None:
-            sleep(0.01)
-            continue
-
-        success, buffer = cv2.imencode(
-            ".jpg",
-            frame,
-            [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
-        )
-
-        if not success:
-            continue
-
-        yield (
-            b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n\r\n"
-            + buffer.tobytes()
-            + b"\r\n"
-        )
-
-
-@app.route("/")
-def index():
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Robot Camera</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-            body {
-                background: #181818;
-                color: white;
-                font-family: sans-serif;
-                text-align: center;
-            }
-            img {
-                width: 100%;
-                max-width: 1200px;
-            }
-        </style>
-    </head>
-    <body>
-        <h2>Robot Camera</h2>
-        <img src="/video_feed">
-    </body>
-    </html>
-    """
-
-
-@app.route("/video_feed")
-def video_feed():
-    return Response(
-        generate_frames(),
-        mimetype="multipart/x-mixed-replace; boundary=frame"
-    )
-
-
-def flask_thread():
-    app.run(
-        host="0.0.0.0",
-        port=FLASK_PORT,
-        threaded=True,
-        debug=False,
-        use_reloader=False
-    )
-
 
 # Thread 1 - Capture image
 def camera_thread():
@@ -177,45 +90,35 @@ def camera_thread():
 
     while running:
         frame = camera.capture_array()
-
-        with camera_lock:
-            latest_frame = frame
+        latest_frame = frame
 
 
 # Helper function to return frame
 def getFrame():
-    with camera_lock:
-        return latest_frame.copy() if latest_frame is not None else None
+    return latest_frame.copy()
 
 
 # Start camera thread
 threading.Thread(target=camera_thread, daemon=True).start()
 
-# Start Flask server
-threading.Thread(target=flask_thread, daemon=True).start()
-
 try:
     # Main loop
     while True:
-
         # Get frame
         frame = getFrame()
 
-        if frame is None:
-            sleep(0.005)
-            continue
-
-        # Crop image
-        frame = frame[CROP_Y_COORDINATE:]
-
         # Lower resolution
-        roi_h, roi_w, _ = frame.shape
-        frame = cv2.resize(frame, (roi_w // 2, roi_h // 2))
+        full_h, full_w, _ = frame.shape
+        frame = cv2.resize(frame, (full_w // 2, full_h // 2))
 
         # Convert to greyscale
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        camera_center = frame.shape[1] / 2
+        # Keep the bigger picture for the crosswalk and crop the rest for the track lines
+        full_frame = frame
+        frame = frame[CROP_Y_COORDINATE // 2:]
+
+        camera_center = (frame.shape[1] / 2)
 
         # Start by assuming the robot is in the middle of the track
         if left_line is None:
@@ -227,15 +130,8 @@ try:
 
         for y in TRACK_LINES:
             row = frame[y, :]
-            _, props = find_peaks(
-                row,
-                width=PEAK_WIDTH,
-                prominence=PEAK_PROMINENCE,
-                distance=PEAK_DISTANCE
-            )
-            all_peaks.extend(
-                (props["left_ips"] + props["right_ips"]) / 2
-            )
+            _, props = find_peaks(row, width=PEAK_WIDTH, prominence=PEAK_PROMINENCE, distance=PEAK_DISTANCE)
+            all_peaks.extend((props["left_ips"] + props["right_ips"]) / 2)
 
         # Group peaks that are close to each other
         all_peaks.sort()
@@ -248,12 +144,29 @@ try:
                 groups.append([peak])
 
         # Only keep lines that were seen on at least 2 track lines
-        line_midpoints = [
-            sum(group) / len(group)
-            for group in groups
-            if len(group) >= 2
-        ]
+        line_midpoints = [sum(group) / len(group) for group in groups if len(group) >= 2]
         print(f"Line midpoints {len(line_midpoints)}")
+
+        # Find horizontal lines in the middle of the track. We look at a bigger part of
+        # the picture than the track lines, so both crosswalk lines fit in at the same time
+        x1 = max(0, int(camera_center) - 100)
+        x2 = int(camera_center) + 100
+        row_brightness = full_frame[CROSSWALK_Y:, x1:x2].mean(axis=1)
+
+        # Rows that are clearly brighter (50) than the usual row are on a horizontal line
+        contrast = row_brightness - np.median(row_brightness)
+        is_line_row = contrast > 50
+
+        # Count where a group of bright rows starts
+        horizontal_lines = np.where(np.diff(is_line_row.astype(int)) == 1)[0]
+        print(f"Horizontal lines {len(horizontal_lines)}  Contrast {contrast.max():.0f}")
+
+        # Crosswalk, 2 horizontal lines. Slow down for CROSSWALK_TIME seconds
+        # and ignore crosswalks for the same time after that
+        if len(horizontal_lines) >= 2 and monotonic() > crosswalk_ignore_until:
+            crosswalk_until = monotonic() + CROSSWALK_TIME
+            crosswalk_ignore_until = crosswalk_until + CROSSWALK_TIME
+            print("Crosswalk")
 
         # Match lines to the old left and right line
         left_match = None
@@ -314,16 +227,17 @@ try:
             # Reset tries
             tries = 0
 
+            # Slow down on crosswalk
+            speed = MOTOR_SPEED
+
+            if monotonic() < crosswalk_until:
+                speed = CROSSWALK_SPEED
+
             if MOTOR_ENABLE:
-                hw.setMotor(MOTOR_SPEED)
+                hw.setMotor(speed)
 
-            # Calculate error and smooth it
-            raw_error = midpoint - camera_center
-            filtered_error = ERROR_FILTER * raw_error + (1 - ERROR_FILTER) * filtered_error
-            error = filtered_error
-
-            if abs(error) < DEADBAND:
-                error = 0
+            # Calculate error
+            error = midpoint - camera_center
 
             # Calculate dt for PID and set last time to now
             now = monotonic()
@@ -343,10 +257,6 @@ try:
             correction = KP * error + KI * integral_sum + KD * derivative
             correction = max(-100, min(100, correction))
 
-            # Limit how fast the steering can change
-            step = max(-MAX_STEP, min(MAX_STEP, correction - previous_correction))
-            correction = previous_correction + step
-
             previous_error = error
             previous_correction = correction
 
@@ -355,72 +265,40 @@ try:
             print(f"Error: {error}")
             print(f"Correction: {correction}")
 
-        # Debug stuff - draw on a separate color image
-        display_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
 
-        # Camera center
-        cv2.line(
-            display_frame,
-            (int(camera_center), 0),
-            (int(camera_center), display_frame.shape[0] - 1),
-            (255, 255, 255),
-            thickness=2
-        )
-
-        # Track detection lines
-        for y in TRACK_LINES:
-            cv2.line(
-                display_frame,
-                (0, y),
-                (display_frame.shape[1] - 1, y),
-                (0, 255, 0),
-                thickness=1
-            )
-
-        # Detected line midpoints
-        for line in line_midpoints:
-            cv2.circle(
-                display_frame,
-                (int(line), TRACK_LINES[0]),
-                3,
-                (255, 0, 0),
-                thickness=2
-            )
-
-        # Where the robot thinks the lines are
-        cv2.circle(
-            display_frame,
-            (int(left_line), TRACK_LINES[0]),
-            8,
-            (255, 255, 0),
-            thickness=2
-        )
-
-        cv2.circle(
-            display_frame,
-            (int(right_line), TRACK_LINES[0]),
-            8,
-            (255, 255, 0),
-            thickness=2
-        )
-
-        cv2.circle(
-            display_frame,
-            (int(midpoint), TRACK_LINES[0]),
-            5,
-            (0, 0, 255),
-            thickness=-1
-        )
-
-        # Publish annotated frame to Flask
-        with stream_lock:
-            latest_stream_frame = display_frame.copy()
-
-        # Show image
         if DEBUG_MODE:
-            cv2.imshow("Frame", display_frame)
+            # Debug stuff
+            cv2.line(frame, (int(frame.shape[1] / 2), 0), (int(frame.shape[1] / 2), frame.shape[0]), 255, thickness=2)
 
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            for y in TRACK_LINES:
+
+                cv2.line(frame, (0, y), (frame.shape[1], y), 0, thickness=1)
+
+            for line in line_midpoints:
+
+                cv2.circle(frame, (int(line), TRACK_LINES[0]), 3, 128, thickness=2)
+
+            # Where the robot thinks the lines are
+            cv2.circle(frame, (int(left_line), TRACK_LINES[0]), 8, 255, thickness=2)
+
+            cv2.circle(frame, (int(right_line), TRACK_LINES[0]), 8, 255, thickness=2)
+
+            cv2.circle(frame, (int(midpoint), TRACK_LINES[0]), 5, 255, thickness=-1)
+
+            # Crosswalk view, the area we look at and the horizontal lines we found
+            cv2.rectangle(full_frame, (x1, CROSSWALK_Y), (x2, full_frame.shape[0] - 1), 255, thickness=1)
+
+            for y in horizontal_lines:
+
+                cv2.line(full_frame, (0, int(y) + CROSSWALK_Y), (full_frame.shape[1], int(y) + CROSSWALK_Y), 255, thickness=1)
+
+            cv2.imshow('Crosswalk', full_frame)
+
+            # Show image
+            cv2.imshow('Frame', frame)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+
                 break
 
 except KeyboardInterrupt:
@@ -429,10 +307,5 @@ except KeyboardInterrupt:
 finally:
     running = False
     cv2.destroyAllWindows()
-
     hw.setMotor(0)
-    hw.setServo(0)
     hw.stop()
-
-    camera.stop()
-    camera.close()
