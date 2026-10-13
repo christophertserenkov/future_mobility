@@ -5,33 +5,18 @@ from time import sleep, monotonic
 from picamera2 import Picamera2
 from scipy.signal import find_peaks
 from hardware import HardWare
-from ultralytics import YOLO
 
 # Degub mode disables motors and enables cv image show
 DEBUG_MODE = False
 MOTOR_ENABLE = True
-MOTOR_SPEED = 80
-
-# Pedestrian sign slowdown
-SLOW_SPEED = 10
-SLOW_TIME = 4
-PEDESTRIAN_SIGN = "pedestrian"
-slow_until = 0
+MOTOR_SPEED = 100
 
 # Crosswalk (more than 3 lines)
-CROSSWALK_SPEED = 50
+CROSSWALK_SPEED = 35
 CROSSWALK_TIME = 2
 CROSSWALK_COOLDOWN = 3
-CROSSWALK_FRAMES = 3
-crosswalk_frames = 0
 crosswalk_until = 0
 crosswalk_ignore_until = 0
-
-# Yolo model
-model = YOLO("best.onnx")
-
-# Prints all sign names the model knows, check the pedestrian sign name from here
-print(model.names)
 
 # I have slept for two hours tonight I have no comment on these variables
 APPROX_TRACK_WIDTH = 500
@@ -117,24 +102,8 @@ def getFrame():
     return latest_frame.copy()
 
 
-# Thread 2 - Find signs
-# YOLO is slow so it runs in its own thread and does not slow down the line following
-def sign_thread():
-    global slow_until
-
-    while running:
-        results = model.predict(getFrame(), imgsz=(160, 320), conf=0.65, verbose=False)[0]
-        detected_signs = [results.names[int(box.cls[0])] for box in results.boxes]
-
-        # Stay slow for SLOW_TIME seconds after seeing the pedestrian sign
-        if PEDESTRIAN_SIGN in detected_signs:
-            slow_until = monotonic() + SLOW_TIME
-            print("Pedestrian sign")
-
-
-# Start threads
+# Start camera thread
 threading.Thread(target=camera_thread, daemon=True).start()
-threading.Thread(target=sign_thread, daemon=True).start()
 
 try:
     # Main loop
@@ -181,15 +150,9 @@ try:
         line_midpoints = [sum(group) / len(group) for group in groups if len(group) >= 2]
         print(f"Line midpoints {len(line_midpoints)}")
 
-        # Crosswalk, more than 3 lines for CROSSWALK_FRAMES frames in a row
-        if len(line_midpoints) > 3:
-            crosswalk_frames += 1
-        else:
-            crosswalk_frames = 0
-
-        # Slow down for CROSSWALK_TIME seconds and then ignore crosswalk for a while
-        # so we do not trigger again on the same crosswalk
-        if crosswalk_frames >= CROSSWALK_FRAMES and monotonic() > crosswalk_ignore_until:
+        # Crosswalk, more than 3 lines. Slow down for CROSSWALK_TIME seconds
+        # and then ignore crosswalks for CROSSWALK_COOLDOWN seconds, so we continue normally
+        if len(line_midpoints) > 3 and monotonic() > crosswalk_ignore_until:
             crosswalk_until = monotonic() + CROSSWALK_TIME
             crosswalk_ignore_until = crosswalk_until + CROSSWALK_COOLDOWN
             print("Crosswalk")
@@ -253,15 +216,11 @@ try:
             # Reset tries
             tries = 0
 
-            # Slow down if we saw the pedestrian sign lately
+            # Slow down on crosswalk
             speed = MOTOR_SPEED
 
-            if monotonic() < slow_until:
-                speed = SLOW_SPEED
-
-            # Slow down on crosswalk (the slower one of the two wins)
             if monotonic() < crosswalk_until:
-                speed = min(speed, CROSSWALK_SPEED)
+                speed = CROSSWALK_SPEED
 
             if MOTOR_ENABLE:
                 hw.setMotor(speed)
@@ -338,3 +297,4 @@ finally:
     running = False
     cv2.destroyAllWindows()
     hw.setMotor(0)
+    hw.stop()
