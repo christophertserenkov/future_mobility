@@ -20,7 +20,7 @@ APPROX_TRACK_WIDTH = 580
 
 # PID Cooficents
 KP = 0.8
-KI = 0.1
+KI = 0.5
 KD = 0
 
 # Hardware pins
