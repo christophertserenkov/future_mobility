@@ -11,7 +11,7 @@ from hardware import HardWare
 DEBUG_MODE = False
 MOTOR_ENABLE = True
 MOTOR_BASE_SPEED = 100
-MOTOR_CROSWALK_SPEED = int(MOTOR_BASE_SPEED / 2)
+MOTOR_CROSWALK_SPEED = 60
 
 motor_speed = 0
 
