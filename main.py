@@ -53,16 +53,17 @@ last_PID_time = monotonic()
 # No lines variables
 tries = 0
 
-# Previous midpoint
-previous_detected_midpoint = 0
-
 # Flask shared frames
 app = Flask(__name__)
 
+# Variabled for steaming frame and image detection frame
 latest_frame = None
 display_frame = None
 
+# Lock frame so no conflicts between read and write
 frame_lock = threading.Lock()
+
+# Stop the capture thread
 stop_event = threading.Event()
 
 # Init hardware
@@ -88,11 +89,7 @@ def generate_frames():
             sleep(0.01)
             continue
 
-        success, buffer = cv2.imencode(
-            ".jpg",
-            frame,
-            [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
-        )
+        success, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
 
         if not success:
             continue
@@ -104,12 +101,14 @@ def generate_frames():
             + b"\r\n"
         )
 
+# Publish frame to streaming
 def publishFrame(frame):
     global display_frame
 
     with frame_lock:
         display_frame = frame.copy()
 
+# Flask server main page
 @app.route("/")
 def index():
     return """
@@ -141,12 +140,12 @@ def index():
     </html>
     """
 
-
+# Flask server video backend thingy
 @app.route("/video_feed")
 def video_feed():
     return Response(generate_frames(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
-
+# Run flask 
 def run_flask():
     app.run(host=FLASK_HOST, port=FLASK_PORT, threaded=True, debug=False, use_reloader=False)
 
@@ -171,8 +170,13 @@ def signDetection():
     global motor_speed;
 
     while True:
+        # Get frame 
         frame = getFrame()
+
+        # Run model
         results = model.predict(frame, imgsz=(160,320), conf=0.65)[0]
+
+        # Detect crosswalk
         if len(results.boxes) > 0:
             detected_signs = [results.names[int(box.cls[0])] for box in results.boxes]
             if 'Crosswalk' in detected_signs:
@@ -237,6 +241,7 @@ try:
         _, props = find_peaks(row, width=[10, 100], prominence=100, distance=100)
         line_midpoints = (props["left_ips"] + props["right_ips"]) / 2
 
+        # Define camera center
         camera_center = gray.shape[1] / 2
 
         if len(line_midpoints) == 0:
@@ -249,6 +254,7 @@ try:
             # Reset tries
             tries = 0
 
+            # Enable motors
             if MOTOR_ENABLE:
                 hw.setMotor(motor_speed)
 
@@ -323,6 +329,7 @@ try:
                     # Calculate derivative
                     derivative = (error - previous_error) / dt
 
+                    # PID calculation
                     correction = KP * error + KI * integral_sum + KD * derivative
                     correction = max(-100, min(100, correction))
 
