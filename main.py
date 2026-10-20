@@ -22,7 +22,7 @@ model = YOLO("best.onnx")
 APPROX_TRACK_WIDTH = 500
 
 # PID Cooficents
-KP = 0.8
+KP = 0.5
 KI = 0.1
 KD = 0
 
