@@ -22,8 +22,8 @@ model = YOLO("best.onnx")
 APPROX_TRACK_WIDTH = 500
 
 # PID Cooficents
-KP = 0.5
-KI = 0.6
+KP = 0.8
+KI = 0.1
 KD = 0
 
 # Hardware pins
@@ -167,6 +167,25 @@ def getFrame():
 
         return latest_frame.copy()
 
+def signDetection():
+    global motor_speed;
+
+    while True:
+        frame = getFrame()
+        results = model.predict(frame, imgsz=(160,320), conf=0.65)[0]
+        if len(results.boxes) > 0:
+            detected_signs = [results.names[int(box.cls[0])] for box in results.boxes]
+            if 'Crosswalk' in detected_signs:
+                motor_speed = MOTOR_CROSWALK_SPEED
+                sleep(2)
+            else:
+                motor_speed = MOTOR_BASE_SPEED
+            print(f"Detected signs: {detected_signs}")
+        else:
+            motor_speed = MOTOR_BASE_SPEED
+        
+        print(f"Motor Speed: {motor_speed}")
+
 
 try:
     camera.start()
@@ -181,6 +200,10 @@ try:
     # Start camera capture thread
     capture_thread = threading.Thread(target=captureFrames, daemon=True)
     capture_thread.start()
+
+    # Start sign detection thread 
+    sign_detection_thread = threading.Thread(target=signDetection, daemon=True)
+    sign_detection_thread.start()
 
     print(f"Camera server starting on port {FLASK_PORT}")
     print("Open http://<raspberry-pi-ip>:5000")
@@ -227,7 +250,7 @@ try:
             tries = 0
 
             if MOTOR_ENABLE:
-                hw.setMotor(MOTOR_BASE_SPEED)
+                hw.setMotor(motor_speed)
 
             # State machine
             if len(line_midpoints) == 2:
@@ -307,7 +330,7 @@ try:
 
                     hw.setServo(correction * 2)
 
-                    print(f"Error: {error}, Correction: {correction:.2f}")
+                    # print(f"Error: {error}, Correction: {correction:.2f}")
 
         # Annotate frame for stream and debug
         display_frame = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
